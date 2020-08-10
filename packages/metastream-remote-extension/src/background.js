@@ -14,6 +14,9 @@
 // Observed tabs on Metastream URL
 const watchedTabs = new Set()
 
+// MS tab frames
+const watchedTabFrames = {};
+
 // Store for active tabs state
 const tabStore = {}
 
@@ -43,7 +46,7 @@ const isMetastreamUrl = url =>
   url.startsWith('http://local.getmetastream.com') ||
   url.startsWith('http://localhost:8080') ||
   url.startsWith('https://localhost:8080')
-const isTopFrame = details => details.frameId === TOP_FRAME
+const isMetastreamFrame = details => details.frameId === watchedTabFrames[details.tabId]
 const isValidAction = action => typeof action === 'object' && typeof action.type === 'string'
 const isFirefox = () => navigator.userAgent.toLowerCase().includes('firefox')
 
@@ -77,7 +80,7 @@ const getFramePath = async (tabId, frameId) => {
   if (framePaths[frameId]) return framePaths[frameId]
   let path = [frameId]
   let currentFrameId = frameId
-  while (currentFrameId > 0) {
+  while (!isMetastreamFrame({tabId, frameId: currentFrameId}) && currentFrameId > 0) {
     const result = await new Promise(resolve => {
       const details = { tabId, frameId: currentFrameId }
       chrome.webNavigation.getFrame(details, details => {
@@ -102,14 +105,13 @@ const getFramePath = async (tabId, frameId) => {
 const sendToFrame = (tabId, frameId, message) =>
   chrome.tabs.sendMessage(tabId, message, { frameId })
 
-const sendToHost = (tabId, message) => sendToFrame(tabId, TOP_FRAME, message)
+const sendToHost = (tabId, message) => sendToFrame(tabId, watchedTabFrames[tabId], message)
 
 const sendWebviewEventToHost = async (tabId, frameId, message) => {
   const framePath = await getFramePath(tabId, frameId)
   sendToHost(
     tabId,
-    { type: 'metastream-webview-event', payload: message, framePath },
-    { frameId: TOP_FRAME }
+    { type: 'metastream-webview-event', payload: message, framePath }
   )
 }
 
@@ -162,7 +164,7 @@ const CONTENT_SCRIPTS = [
 // Add Metastream header overwrites
 const onBeforeSendHeaders = details => {
   const { tabId, requestHeaders: headers } = details
-  const shouldModify = (watchedTabs.has(tabId) && isTopFrame(details)) || tabId === -1
+  const shouldModify = (watchedTabs.has(tabId) && isMetastreamFrame(details)) || tabId === -1
   if (shouldModify) {
     for (let i = headers.length - 1; i >= 0; --i) {
       const header = headers[i].name.toLowerCase()
@@ -183,13 +185,12 @@ const onHeadersReceived = details => {
   let permitted = false
 
   // Whether these headers are within the context of a frame embedded in app.getmetastream.com
-  const isMetastreamEmbedFrame = watchedTabs.has(tabId) && !isTopFrame(details)
+  const isMetastreamEmbedFrame = watchedTabs.has(tabId) && !isMetastreamFrame(details)
 
   const isServiceWorkerRequest = watchedTabs.size > 0 && tabId === -1 && frameId === -1
   const shouldModify = isMetastreamEmbedFrame || isServiceWorkerRequest
 
   // TODO: HTTP 301 redirects don't get captured. Try https://reddit.com/
-
   if (shouldModify) {
     for (let i = headers.length - 1; i >= 0; --i) {
       const header = headers[i].name.toLowerCase()
@@ -258,7 +259,7 @@ const onTabRemove = (tabId, removeInfo) => {
 const onBeforeNavigate = details => {
   const { tabId, frameId, url } = details
   if (!watchedTabs.has(tabId)) return
-  if (isTopFrame(frameId)) return
+  if (isMetastreamFrame(details)) return
   ;(async () => {
     const framePath = await getFramePath(tabId, frameId)
     const isWebviewFrame = framePath[1] === frameId
@@ -279,7 +280,7 @@ const initScripts = details => {
 
   if (!watchedTabs.has(tabId)) return
 
-  if (isTopFrame(details) && !popupTabs.has(tabId)) {
+  if (isMetastreamFrame(details) && !popupTabs.has(tabId)) {
     // Listen for top frame navigating away from Metastream
     if (!isMetastreamUrl(details.url)) {
       stopWatchingTab(tabId)
@@ -292,7 +293,7 @@ const initScripts = details => {
 const onCompleted = details => {
   const { tabId, frameId, url } = details
   if (!watchedTabs.has(tabId)) return
-  if (isTopFrame(frameId)) return
+  if (isMetastreamFrame(details)) return
   ;(async () => {
     const framePath = await getFramePath(tabId, frameId)
     const isWebviewFrame = framePath[1] === frameId
@@ -305,7 +306,7 @@ const onCompleted = details => {
 const onHistoryStateUpdated = details => {
   const { tabId, frameId, url } = details
   if (!watchedTabs.has(tabId)) return
-  if (isTopFrame(frameId)) return
+  if (isMetastreamFrame(details)) return
   ;(async () => {
     const framePath = await getFramePath(tabId, frameId)
     const isWebviewFrame = framePath[1] === frameId
@@ -335,6 +336,7 @@ const initializeWebview = details => {
     hostId = parentTabId
     popupTabs.add(tabId)
     watchedTabs.add(tabId)
+    watchedTabFrames[tabId] = TOP_FRAME
     popupParentTabs[tabId] = hostId
   } else if (watchedTabs.has(tabId)) {
     hostId = tabId
@@ -407,10 +409,11 @@ const injectContentScripts = async details => {
 // Metastream tab management
 //=============================================================================
 
-const startWatchingTab = tab => {
+const startWatchingTab = (tab, frameId) => {
   const { id: tabId } = tab
-  console.log(`Metastream watching tabId=${tabId}`)
+  console.log(`Metastream watching tabId=${tabId} frameId=${frameId}`)
   watchedTabs.add(tabId)
+  watchedTabFrames[tabId] = frameId  
 
   const state = {
     // Webview frames which allow scripts to be injected
@@ -466,6 +469,7 @@ const startWatchingTab = tab => {
 
 const stopWatchingTab = tabId => {
   watchedTabs.delete(tabId)
+  delete watchedTabFrames[tabId]
 
   const state = tabStore[tabId]
   if (state) {
@@ -577,11 +581,11 @@ const handleWebviewEvent = async (sender, action) => {
   // popups always send webview events back to host app
   if (popupTabs.has(tabId)) {
     const parentId = popupParentTabs[tabId]
-    sendWebviewEventToHost(parentId, TOP_FRAME, action.payload)
+    sendWebviewEventToHost(parentId, watchedTabFrames[tabId], action.payload)
     return
   }
 
-  if (isTopFrame(sender)) {
+  if (isMetastreamFrame({frameId, tabId})) {
     // sent from app
     sendToFrame(action.tabId || tabId, action.frameId, action.payload)
   } else {
@@ -595,8 +599,8 @@ function messageHandler(action, sender, sendResponse) {
   if (!isValidAction(action)) return
 
   // Listen for Metastream app initialization signal
-  if (action.type === 'metastream-init' && isMetastreamUrl(sender.tab.url)) {
-    startWatchingTab(sender.tab)
+  if (action.type === 'metastream-init' && isMetastreamUrl(sender.url)) {
+    startWatchingTab(sender.tab, sender.frameId)
     sendResponse(true)
     return
   }

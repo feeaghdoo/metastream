@@ -6,14 +6,33 @@
 //
 ;(function app() {
   const isInstalled = typeof document.documentElement.dataset.extensionInstalled !== 'undefined'
+  const METASTREAM_APP_URL = 'https://app.getmetastream.com'
+  const isMetastreamUrl = url =>
+    url.startsWith(METASTREAM_APP_URL) ||
+    url.startsWith('http://local.getmetastream.com') ||
+    url.startsWith('http://localhost:8080') ||
+    url.startsWith('https://localhost:8080')
   if (isInstalled) {
     console.warn(`Metastream already initialized, is the extension installed twice?`)
     return
   }
 
-  if (window.self !== window.top) {
+  /*if (window.self !== window.top) {
     console.warn('Metastream is unsupported within subframes.')
     return
+  }*/
+  if (window.parent !== window.self) {
+    try {
+      let parent = window.parent;  
+      do {
+        if (isMetastreamUrl(parent.location.href)) {
+          console.log('Abandon loading app.js Metastream subframe within Metastream.')
+          return
+        }
+        parent = parent.parent;
+      } while (parent != window.top)
+    } catch (e) {
+    }
   }
 
   function dispatchInstallEvent() {
