@@ -264,6 +264,7 @@ const onBeforeNavigate = details => {
     const framePath = await getFramePath(tabId, frameId)
     const isWebviewFrame = framePath[1] === frameId
     if (isWebviewFrame) {
+      fixCookies(details)
       sendWebviewEventToHost(tabId, frameId, { type: 'will-navigate', payload: { url } })
     }
   })()
@@ -288,6 +289,33 @@ const initScripts = details => {
   } else {
     injectContentScripts(details)
   }
+}
+
+//Workaround for Chrome 84 change that requires cookies to be SameSite=none; Secure if third party
+const fixCookies = details => {
+  if (isFirefox()) {
+    return
+  }
+  const { url } = details
+  chrome.cookies.getAll({url}, (cookies) => {
+    for (let i = 0; i < cookies.length; i++) {
+      if (!cookies[i].secure || cookies[i].sameSite !== "no_restriction") {
+        cookies[i].secure = true;
+        cookies[i].sameSite = "no_restriction";
+        chrome.cookies.set({
+          url: "https://" + cookies[i].domain.replace(/^\./, '') + cookies[i].path,
+          name: cookies[i].name,
+          value: cookies[i].value,
+          domain: cookies[i].domain,
+          path: cookies[i].path,
+          secure: true,
+          sameSite: "no_restriction",
+          expirationDate: cookies[i].expirationDate,
+          storeId: cookies[i].storeId,
+        });
+      }
+    }
+  })
 }
 
 const onCompleted = details => {
